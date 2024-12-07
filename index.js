@@ -21,7 +21,8 @@ const bareServer = createBareServer("/fq/");
 const PORT = process.env.PORT || 8080;
 const cache = new Map();
 const CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // Cache for 30 Days
-
+const session = require('express-session');
+const { Issuer, generators } = require('openid-client');
 if (config.challenge !== false) {
   console.log(
     chalk.green("🔒 Password protection is enabled! Listing logins below"),
@@ -32,7 +33,30 @@ if (config.challenge !== false) {
   });
   app.use(basicAuth({ users: config.users, challenge: true }));
 }
-
+// Initialize OpenID Client
+async function initializeClient() {
+    const issuer = await Issuer.discover('https://cognito-idp.us-east-2.amazonaws.com/us-east-2_fVr04iHql');
+    client = new issuer.Client({
+        client_id: '4v8o9t04gk3vvnfp2sou34opl1',
+        client_secret: '<client secret>',
+        redirect_uris: ['https://d84l1y8p4kdic.cloudfront.net'],
+        response_types: ['code']
+    });
+};
+initializeClient().catch(console.error);
+app.use(session({
+    secret: 'soghhgfdghffgdhdhfhfg',
+    resave: false,
+    saveUninitialized: false
+}));
+const checkAuth = (req, res, next) => {
+    if (!req.session.userInfo) {
+        req.isAuthenticated = false;
+    } else {
+        req.isAuthenticated = true;
+    }
+    next();
+};
 app.get("/e/*", async (req, res, next) => {
   try {
     if (cache.has(req.path)) {
@@ -111,7 +135,63 @@ routes.forEach(route => {
     res.sendFile(path.join(__dirname, "static", route.file));
   });
 });
+app.get('/login', (req, res) => {
+    const nonce = generators.nonce();
+    const state = generators.state();
 
+    req.session.nonce = nonce;
+    req.session.state = state;
+
+    const authUrl = client.authorizationUrl({
+        scope: 'phone openid email',
+        state: state,
+        nonce: nonce,
+    });
+
+    res.redirect(authUrl);
+});
+// Helper function to get the path from the URL. Example: "http://localhost/hello" returns "/hello"
+function getPathFromURL(urlString) {
+    try {
+        const url = new URL(urlString);
+        return url.pathname;
+    } catch (error) {
+        console.error('Invalid URL:', error);
+        return null;
+    }
+}
+
+app.get(getPathFromURL('https://d84l1y8p4kdic.cloudfront.net'), async (req, res) => {
+    try {
+        const params = client.callbackParams(req);
+        const tokenSet = await client.callback(
+            'https://d84l1y8p4kdic.cloudfront.net',
+            params,
+            {
+                nonce: req.session.nonce,
+                state: req.session.state
+            }
+        );
+
+        const userInfo = await client.userinfo(tokenSet.access_token);
+        req.session.userInfo = userInfo;
+
+        res.redirect('/');
+    } catch (err) {
+        console.error('Callback error:', err);
+        res.redirect('/');
+    }
+});
+// Logout route
+app.get('/logout', (req, res) => {
+    req.session.destroy();
+    const logoutUrl = `https://<user pool domain>/logout?client_id=4v8o9t04gk3vvnfp2sou34opl1&logout_uri=<logout uri>`;
+    res.redirect(logoutUrl);
+});
+app.get((req, res, next) => {
+    isAuthenticated: req.isAuthenticated,
+    userInfo: req.session.userInfo
+});
 app.use((req, res, next) => {
   res.status(404).sendFile(path.join(__dirname, "static", "404.html"));
 });
@@ -136,7 +216,7 @@ server.on("upgrade", (req, socket, head) => {
     socket.end();
   }
 });
-
+app.set('view engine', 'ejs');
 server.on("listening", () => {
   console.log(chalk.green(`🌍 Server is running on http://localhost:${PORT}`));
 });
